@@ -1,4 +1,4 @@
-/* Copyright (c) 2012-2014, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2015, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -41,6 +41,26 @@
 
 #define L_MODE V4L2_MPEG_VIDEO_H264_LOOP_FILTER_MODE_DISABLED_AT_SLICE_BOUNDARY
 #define CODING V4L2_MPEG_VIDEO_MPEG4_PROFILE_ADVANCED_CODING_EFFICIENCY
+
+/* Default 601 to 709 conversion coefficients for resolution: 176x144
+ * negative coeffs are converted to s4.9 format
+ * e.g. -22 converted to ((1<<13) - 22)
+ */
+#define MAX_MATRIX_COEFFS 9
+#define MAX_BIAS_COEFFS 3
+#define MAX_LIMIT_COEFFS 6
+/* 3x3 transformation matrix coefficients in s4.9 fixed point format */
+static u32 vpe_csc_601_to_709_matrix_coeff[MAX_MATRIX_COEFFS] = {
+	0x1B9, 0x1FCC, 0x1FA2, 0, 0x1CC, 0x34, 0, 0x22, 0x1CF
+};
+/* offset coefficients in s9 fixed point format */
+static u32 vpe_csc_601_to_709_bias_coeff[MAX_BIAS_COEFFS] = {
+    0x35, 0, 0x4
+};
+/* clamping value for Y/U/V([min,max] for Y/U/V) */
+static u32 vpe_csc_601_to_709_limit_coeff[MAX_LIMIT_COEFFS] = {
+	0x10, 0xEB, 0x10, 0xF0, 0x10, 0xF0
+};
 
 static const char *const mpeg_video_rate_control[] = {
 	"No Rate Control",
@@ -808,7 +828,27 @@ static struct msm_vidc_ctrl msm_venc_ctrls[] = {
 		.default_value = 1,
 		.step = 1,
 		.qmenu = NULL,
-	}
+	},
+	{
+		.id = V4L2_CID_MPEG_VIDC_VIDEO_PRIORITY,
+		.name = "Session Priority",
+		.type = V4L2_CTRL_TYPE_INTEGER,
+		.minimum = V4L2_MPEG_VIDC_VIDEO_PRIORITY_REALTIME_ENABLE,
+		.maximum = V4L2_MPEG_VIDC_VIDEO_PRIORITY_REALTIME_DISABLE,
+		.default_value = V4L2_MPEG_VIDC_VIDEO_PRIORITY_REALTIME_DISABLE,
+		.step = 1,
+		.qmenu = NULL,
+	},
+	{
+		.id = V4L2_CID_MPEG_VIDC_VIDEO_OPERATING_RATE,
+		.name = "Set Encoder Operating rate",
+		.type = V4L2_CTRL_TYPE_INTEGER,
+		.minimum = 0,
+		.maximum = 300 << 16,  /* 300 fps in Q16 format*/
+		.default_value = 0,
+		.step = 1,
+		.qmenu = NULL,
+	},
 };
 
 #define NUM_CTRLS ARRAY_SIZE(msm_venc_ctrls)
@@ -879,6 +919,7 @@ static struct msm_vidc_format venc_formats[] = {
 		.get_frame_size = get_frame_size_nv21,
 		.type = OUTPUT_PORT,
 	},
+
 };
 
 static int msm_venc_queue_setup(struct vb2_queue *q,
@@ -1286,7 +1327,7 @@ static inline int venc_v4l2_to_hal(int id, int value)
 		default:
 			goto unknown_value;
 		}
-	/* H263 */
+		/* H263 */
 	case V4L2_CID_MPEG_VIDC_VIDEO_H263_PROFILE:
 		switch (value) {
 		case V4L2_MPEG_VIDC_VIDEO_H263_PROFILE_BASELINE:
@@ -1557,10 +1598,16 @@ static int try_set_ctrl(struct msm_vidc_inst *inst, struct v4l2_ctrl *ctrl)
 			case V4L2_CID_MPEG_VIDC_VIDEO_RATE_CONTROL_VBR_CFR:
 				update_ctrl.val =
 					V4L2_MPEG_VIDEO_BITRATE_MODE_VBR;
+				break;
 			case V4L2_CID_MPEG_VIDC_VIDEO_RATE_CONTROL_CBR_VFR:
 			case V4L2_CID_MPEG_VIDC_VIDEO_RATE_CONTROL_CBR_CFR:
 				update_ctrl.val =
 					V4L2_MPEG_VIDEO_BITRATE_MODE_CBR;
+				break;
+			default:
+				dprintk(VIDC_ERR,
+					"Unknown Rate control method (%d)", ctrl->val);
+				break;
 			}
 
 			final_mode = ctrl->val;
@@ -2202,6 +2249,14 @@ static int try_set_ctrl(struct msm_vidc_inst *inst, struct v4l2_ctrl *ctrl)
 		}
 		pdata = &hier_p_layers;
 		break;
+	case V4L2_CID_MPEG_VIDC_VIDEO_PRIORITY:
+		property_id = HAL_CONFIG_REALTIME;
+		enable.enable = ctrl->val;
+		pdata = &enable;
+		break;
+	case V4L2_CID_MPEG_VIDC_VIDEO_OPERATING_RATE:
+		property_id = 0;
+		break;
 	default:
 		dprintk(VIDC_ERR, "Unsupported index: %x\n", ctrl->id);
 		rc = -ENOTSUPP;
@@ -2542,7 +2597,7 @@ int msm_venc_s_parm(struct msm_vidc_inst *inst, struct v4l2_streamparm *a)
 
 	if ((fps % 15 == 14) || (fps % 24 == 23))
 		fps = fps + 1;
-	else if ((fps % 24 == 1) || (fps % 15 == 1))
+	else if ((fps > 1) && ((fps % 24 == 1) || (fps % 15 == 1)))
 		fps = fps - 1;
 
 	if (inst->prop.fps != fps) {
@@ -2565,6 +2620,35 @@ int msm_venc_s_parm(struct msm_vidc_inst *inst, struct v4l2_streamparm *a)
 exit:
 	return rc;
 }
+
+int msm_venc_s_csc(struct msm_vidc_inst *inst)
+{
+	int rc = 0;
+	int count = 0;
+	struct hal_vpe_color_space_conversion vpe_csc;
+
+	dprintk(VIDC_DBG, "%s\n", __func__);
+
+	while (count < MAX_MATRIX_COEFFS) {
+		if (count < MAX_BIAS_COEFFS)
+			vpe_csc.csc_bias[count] =
+				vpe_csc_601_to_709_bias_coeff[count];
+		if (count < MAX_LIMIT_COEFFS)
+			vpe_csc.csc_limit[count] =
+				vpe_csc_601_to_709_limit_coeff[count];
+		vpe_csc.csc_matrix[count] =
+			vpe_csc_601_to_709_matrix_coeff[count];
+		count = count + 1;
+	}
+	rc = msm_comm_try_set_prop(inst,
+			HAL_PARAM_VPE_COLOR_SPACE_CONVERSION, &vpe_csc);
+	if (rc) {
+		dprintk(VIDC_ERR, "%s vpe csc set_prop skip\n",
+					__func__);
+	}
+	return rc;
+}
+
 int msm_venc_s_fmt(struct msm_vidc_inst *inst, struct v4l2_format *f)
 {
 	struct msm_vidc_format *fmt = NULL;
@@ -2582,6 +2666,10 @@ int msm_venc_s_fmt(struct msm_vidc_inst *inst, struct v4l2_format *f)
 		return -EINVAL;
 	}
 	hdev = inst->core->device;
+
+//	if (msm_vidc_vpe_csc_601_to_709) {
+		msm_venc_s_csc(inst);
+//	}
 
 	if (f->type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE) {
 		fmt = msm_comm_get_pixel_fmt_fourcc(venc_formats,
@@ -2750,13 +2838,13 @@ int msm_venc_g_fmt(struct msm_vidc_inst *inst, struct v4l2_format *f)
 			if (f->type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE) {
 				inst->bufq[OUTPUT_PORT].vb2_bufq.
 				plane_sizes[i] =
-				f->fmt.pix_mp.plane_fmt[i].sizeimage;
+			f->fmt.pix_mp.plane_fmt[i].sizeimage;
 			} else if (f->type ==
 				V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE) {
 				inst->bufq[CAPTURE_PORT].vb2_bufq.
 				plane_sizes[i] =
 				f->fmt.pix_mp.plane_fmt[i].sizeimage;
-			}
+		}
 		}
 	} else {
 		dprintk(VIDC_ERR,
@@ -2806,6 +2894,14 @@ int msm_venc_prepare_buf(struct msm_vidc_inst *inst,
 
 	hdev = inst->core->device;
 
+	if (inst->state == MSM_VIDC_CORE_INVALID ||
+			inst->core->state == VIDC_CORE_INVALID) {
+		dprintk(VIDC_ERR,
+			"Core %p in bad state, ignoring prepare buf\n",
+				inst->core);
+		goto exit;
+	}
+
 	switch (b->type) {
 	case V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE:
 		break;
@@ -2851,6 +2947,7 @@ int msm_venc_prepare_buf(struct msm_vidc_inst *inst,
 			"Buffer type not recognized: %d\n", b->type);
 		break;
 	}
+exit:
 	return rc;
 }
 
@@ -3000,8 +3097,20 @@ static struct v4l2_ctrl **get_super_cluster(struct msm_vidc_inst *inst,
 	struct v4l2_ctrl **cluster = kmalloc(sizeof(struct v4l2_ctrl *) *
 			NUM_CTRLS, GFP_KERNEL);
 
+/* MMRND_AVRC. Start */
+// Avoid PREVENT
+#if 1
+        if (!size || !cluster || !inst)
+        {
+                if(cluster)
+                    kfree(cluster); // PREVENT Resource leak fix
+                return NULL;
+        }
+#else
 	if (!size || !cluster || !inst)
 		return NULL;
+#endif
+/* MMRND_AVRC. End */
 
 	for (c = 0; c < NUM_CTRLS; c++)
 		cluster[sz++] =  inst->ctrls[c];
@@ -3093,7 +3202,7 @@ int msm_venc_ctrl_init(struct msm_vidc_inst *inst)
 		dprintk(VIDC_WARN,
 				"Failed to setup super cluster\n");
 		return -EINVAL;
-	}
+		}
 
 	v4l2_ctrl_cluster(cluster_size, inst->cluster);
 

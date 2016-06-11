@@ -47,6 +47,10 @@
 #include "wcnss_prealloc.h"
 #endif
 
+#ifdef CONFIG_WCNSS_IRIS_REGISTER_DUMP
+#include <mach/board.h>
+#endif
+
 #define DEVICE "wcnss_wlan"
 #define CTRL_DEVICE "wcnss_ctrl"
 #define VERSION "1.01"
@@ -140,6 +144,10 @@ static DEFINE_SPINLOCK(reg_spinlock);
 #define WCNSS_TSTBUS_CTRL_WRFIFO	(0x04 << 1)
 #define WCNSS_TSTBUS_CTRL_RDFIFO	(0x05 << 1)
 #define WCNSS_TSTBUS_CTRL_CTRL		(0x07 << 1)
+//#define WCNSS_TSTBUS_CTRL_AXIM_CFG0	(0x00 << 6)
+//#define WCNSS_TSTBUS_CTRL_AXIM_CFG1	(0x01 << 6)
+//#define WCNSS_TSTBUS_CTRL_CTRL_CFG0	(0x00 << 12)
+//#define WCNSS_TSTBUS_CTRL_CTRL_CFG1	(0x01 << 12)
 #define WCNSS_TSTBUS_CTRL_AXIM_CFG0	(0x00 << 8)
 #define WCNSS_TSTBUS_CTRL_AXIM_CFG1	(0x01 << 8)
 #define WCNSS_TSTBUS_CTRL_CTRL_CFG0	(0x00 << 28)
@@ -158,7 +166,7 @@ static DEFINE_SPINLOCK(reg_spinlock);
 #define PRONTO_PLL_STATUS_OFFSET		0x1c
 
 #define MSM_PRONTO_MCU_BASE			0xfb080c00
-#define MCU_APB2PHY_STATUS_OFFSET		0xec
+#define MCU_APB2PHY_STATUS_OFFSET               0xec
 #define MCU_CBR_CCAHB_ERR_OFFSET		0x380
 #define MCU_CBR_CAHB_ERR_OFFSET			0x384
 #define MCU_CBR_CCAHB_TIMEOUT_OFFSET		0x388
@@ -215,7 +223,6 @@ static DEFINE_SPINLOCK(reg_spinlock);
 #define	WCNSS_BUILD_VER_REQ           (WCNSS_CTRL_MSG_START + 9)
 #define	WCNSS_BUILD_VER_RSP           (WCNSS_CTRL_MSG_START + 10)
 #define	WCNSS_PM_CONFIG_REQ           (WCNSS_CTRL_MSG_START + 11)
-#define WCNSS_CBC_COMPLETE_IND		(WCNSS_CTRL_MSG_START + 12)
 
 /* max 20mhz channel count */
 #define WCNSS_MAX_CH_NUM			45
@@ -407,8 +414,8 @@ static struct {
 	void __iomem *alarms_txctl;
 	void __iomem *alarms_tactl;
 	void __iomem *fiq_reg;
+	int	ssr_boot;
 	int	nv_downloaded;
-	int	is_cbc_done;
 	unsigned char *fw_cal_data;
 	unsigned char *user_cal_data;
 	int	fw_cal_rcvd;
@@ -811,7 +818,7 @@ void wcnss_pronto_log_debug_regs(void)
 	reg_addr = penv->pronto_mcu_base + MCU_APB2PHY_STATUS_OFFSET;
 	reg = readl_relaxed(reg_addr);
 	pr_err("MCU_APB2PHY_STATUS %08x\n", reg);
-
+	
 	reg_addr = penv->pronto_mcu_base + MCU_CBR_CCAHB_ERR_OFFSET;
 	reg = readl_relaxed(reg_addr);
 	pr_err("MCU_CBR_CCAHB_ERR %08x\n", reg);
@@ -1051,8 +1058,9 @@ static void wcnss_smd_notify_event(void *data, unsigned int event)
 	case SMD_EVENT_CLOSE:
 		pr_debug("wcnss: closing WCNSS SMD channel :%s",
 				WCNSS_CTRL_CHANNEL);
+		/* This SMD is closed only during SSR */
+		penv->ssr_boot = true;
 		penv->nv_downloaded = 0;
-		penv->is_cbc_done = 0;
 		break;
 
 	default:
@@ -1261,15 +1269,6 @@ int wcnss_device_ready(void)
 }
 EXPORT_SYMBOL(wcnss_device_ready);
 
-int wcnss_cbc_complete(void)
-{
-	if (penv && penv->pdev && penv->is_cbc_done &&
-		!wcnss_device_is_shutdown())
-		return 1;
-	return 0;
-}
-EXPORT_SYMBOL(wcnss_cbc_complete);
-
 int wcnss_device_is_shutdown(void)
 {
 	if (penv && penv->is_shutdown)
@@ -1358,6 +1357,7 @@ EXPORT_SYMBOL(wcnss_get_serial_number);
 
 int wcnss_get_wlan_mac_address(char mac_addr[WLAN_MAC_ADDR_SIZE])
 {
+      return -1;
 	if (!penv)
 		return -ENODEV;
 
@@ -1905,12 +1905,9 @@ static void wcnssctrl_rx_handler(struct work_struct *worker)
 		pr_debug("wcnss: received WCNSS_CALDATA_DNLD_RSP from ccpu %u\n",
 			fw_status);
 		break;
-	case WCNSS_CBC_COMPLETE_IND:
-		penv->is_cbc_done = 1;
-		pr_info("wcnss: received WCNSS_CBC_COMPLETE_IND from FW\n");
-		break;
 
 	case WCNSS_CALDATA_UPLD_REQ:
+		penv->fw_cal_available = 0;
 		extract_cal_data(len);
 		break;
 
@@ -1996,7 +1993,9 @@ static void wcnss_nvbin_dnld(void)
 	const struct firmware *nv = NULL;
 	struct device *dev = &penv->pdev->dev;
 
+  pr_err("wcnss: wcnss_nvbin_dnld \n");
 	down_read(&wcnss_pm_sem);
+  pr_err("wcnss: request_firmware \n");
 
 	ret = request_firmware(&nv, NVBIN_FILE, dev);
 
@@ -2015,8 +2014,8 @@ static void wcnss_nvbin_dnld(void)
 
 	total_fragments = TOTALFRAGMENTS(nv_blob_size);
 
-	pr_info("wcnss: NV bin size: %d, total_fragments: %d\n",
-		nv_blob_size, total_fragments);
+  pr_err("wcnss: NV bin size: %d, total_fragments: %d\n",
+  nv_blob_size, total_fragments);
 
 	/* get buffer for nv bin dnld req message */
 	outbuffer = kmalloc((sizeof(struct nvbin_dnld_req_msg) +

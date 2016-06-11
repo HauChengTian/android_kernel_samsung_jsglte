@@ -26,13 +26,13 @@
 #include <sound/pcm.h>
 #include <sound/jack.h>
 #include <sound/q6afe-v2.h>
+#include <sound/q6core.h>
 #include <sound/pcm_params.h>
 #include <asm/mach-types.h>
 #include <mach/subsystem_notif.h>
 #include <mach/socinfo.h>
 
 #include "qdsp6v2/msm-pcm-routing-v2.h"
-#include "qdsp6v2/q6core.h"
 #include "../codecs/wcd9xxx-common.h"
 #include "../codecs/wcd9320.h"
 
@@ -374,15 +374,16 @@ static int apq8074_liquid_init_docking(struct snd_soc_dapm_context *dapm)
 
 		apq8074_liquid_dock_dev->dapm = dapm;
 
+		INIT_WORK(
+			&apq8074_liquid_dock_dev->irq_work,
+			apq8074_liquid_docking_irq_work);
+
 		ret = request_irq(apq8074_liquid_dock_dev->dock_plug_irq,
 				  apq8074_liquid_docking_irq_handler,
 				  dock_plug_irq_flags,
 				  "liquid_dock_plug_irq",
 				  apq8074_liquid_dock_dev);
 
-		INIT_WORK(
-			&apq8074_liquid_dock_dev->irq_work,
-			apq8074_liquid_docking_irq_work);
 	}
 
 	return 0;

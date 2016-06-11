@@ -764,7 +764,10 @@ int create_pkt_cmd_session_set_property(
 		struct hfi_enable *hfi;
 		pkt->rg_property_data[0] = HFI_PROPERTY_CONFIG_REALTIME;
 		hfi = (struct hfi_enable *) &pkt->rg_property_data[1];
-		hfi->enable = ((struct hfi_enable *) pdata)->enable;
+		/* firmware has inverted vaules for realtime and
+		 * non-realtime priority
+		 */
+		hfi->enable = !(((struct hfi_enable *) pdata)->enable);
 		pkt->size += sizeof(u32) * 2;
 		break;
 	}
@@ -1501,6 +1504,22 @@ int create_pkt_cmd_session_set_property(
 		hfi->qp_p = quant->qpp;
 		hfi->qp_b = quant->qpb;
 		pkt->size += sizeof(u32) + sizeof(struct hfi_initial_quantization);
+		break;
+	}
+	case HAL_PARAM_VPE_COLOR_SPACE_CONVERSION:
+	{
+		struct hfi_vpe_color_space_conversion *hfi = NULL;
+		struct hal_vpe_color_space_conversion *hal = pdata;
+		pkt->rg_property_data[0] =
+				HFI_PROPERTY_PARAM_VPE_COLOR_SPACE_CONVERSION;
+		hfi = (struct hfi_vpe_color_space_conversion *)
+			&pkt->rg_property_data[1];
+		*hfi = *(struct hfi_vpe_color_space_conversion *) hal;
+		pkt->size += sizeof(u32) +
+				sizeof(struct hal_vpe_color_space_conversion);
+
+		dprintk(VIDC_DBG, "%s HAL_PARAM_VPE_COLOR_SPACE_CONVERSION\n",
+				__func__);
 		break;
 	}
 	/* FOLLOWING PROPERTIES ARE NOT IMPLEMENTED IN CORE YET */

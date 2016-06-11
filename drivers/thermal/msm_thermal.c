@@ -39,6 +39,8 @@
 #include <mach/rpm-regulator-smd.h>
 #include <linux/regulator/consumer.h>
 #include <linux/msm_thermal_ioctl.h>
+#include <mach/rpm-smd.h>
+#include <mach/scm.h>
 
 #define MAX_CURRENT_UA 1000000
 #define MAX_RAILS 5
@@ -46,9 +48,11 @@
 #define MONITOR_ALL_TSENS -1
 #define BYTES_PER_FUSE_ROW  8
 #define MAX_EFUSE_VALUE  16
+#define THERM_SECURE_BITE_CMD 8
 
 static struct msm_thermal_data msm_thermal_info;
 static struct delayed_work check_temp_work;
+static struct delayed_work temp_log_work;
 static bool core_control_enabled;
 static uint32_t cpus_offlined;
 static DEFINE_MUTEX(core_control_mutex);
@@ -89,6 +93,7 @@ static bool ocr_nodes_called;
 static bool ocr_probed;
 static bool interrupt_mode_enable;
 static bool msm_thermal_probed;
+static bool therm_reset_enabled;
 static int *tsens_id_map;
 static DEFINE_MUTEX(vdd_rstr_mutex);
 static DEFINE_MUTEX(psm_mutex);
@@ -169,6 +174,7 @@ struct psm_rail {
 };
 
 enum msm_thresh_list {
+	MSM_THERM_RESET,
 	MSM_VDD_RESTRICTION,
 	MSM_LIST_MAX_NR,
 };
@@ -814,8 +820,11 @@ static int msm_thermal_get_freq_table(void)
 
 	while (table[i].frequency != CPUFREQ_TABLE_END)
 		i++;
-
+//#ifdef CONFIG_SEC_PM
+//	limit_idx_low = 7;
+//#else
 	limit_idx_low = 0;
+//#endif
 	limit_idx_high = limit_idx = i - 1;
 	BUG_ON(limit_idx_high <= 0 || limit_idx_high <= limit_idx_low);
 fail:
@@ -927,6 +936,73 @@ static int set_threshold(uint32_t zone_id,
 	}
 set_threshold_exit:
 	return ret;
+}
+
+static void msm_thermal_bite(int tsens_id, long temp)
+{
+	pr_err("TSENS:%d reached temperature:%ld. System reset\n",
+		tsens_id, temp);
+	scm_call_atomic1(SCM_SVC_BOOT, THERM_SECURE_BITE_CMD, 0);
+}
+
+static int do_therm_reset(void)
+{
+	int ret = 0, i;
+	long temp = 0;
+
+	if (!therm_reset_enabled)
+		return ret;
+
+	for (i = 0; i < thresh[MSM_THERM_RESET].thresh_ct; i++) {
+		ret = therm_get_temp(
+			thresh[MSM_THERM_RESET].thresh_list[i].sensor_id,
+			THERM_TSENS_ID,
+			&temp);
+		if (ret) {
+			pr_err("Unable to read TSENS sensor:%d. err:%d\n",
+			thresh[MSM_THERM_RESET].thresh_list[i].sensor_id,
+			ret);
+			continue;
+		}
+
+		if (temp >= msm_thermal_info.therm_reset_temp_degC)
+			msm_thermal_bite(
+			thresh[MSM_THERM_RESET].thresh_list[i].sensor_id, temp);
+	}
+
+	return ret;
+}
+
+static void therm_reset_notify(struct therm_threshold *thresh_data)
+{
+	long temp;
+	int ret = 0;
+
+	if (!therm_reset_enabled)
+		return;
+
+	if (!thresh_data) {
+		pr_err("Invalid input\n");
+		return;
+	}
+
+	switch (thresh_data->trip_triggered) {
+	case THERMAL_TRIP_CONFIGURABLE_HI:
+		ret = therm_get_temp(thresh_data->sensor_id,
+				THERM_TSENS_ID, &temp);
+		if (ret)
+			pr_err("Unable to read TSENS sensor:%d. err:%d\n",
+				thresh_data->sensor_id, ret);
+		msm_thermal_bite(tsens_id_map[thresh_data->sensor_id],
+					temp);
+		break;
+	case THERMAL_TRIP_CONFIGURABLE_LOW:
+		break;
+	default:
+		pr_err("Invalid trip type\n");
+		break;
+	}
+	set_threshold(thresh_data->sensor_id, thresh_data->threshold);
 }
 
 #ifdef CONFIG_SMP
@@ -1231,6 +1307,11 @@ static void __ref do_freq_control(long temp)
 		if (limit_idx < limit_idx_low)
 			limit_idx = limit_idx_low;
 		max_freq = table[limit_idx].frequency;
+
+#ifdef CONFIG_SEC_PM_DEBUG
+		pr_info("%s: down Limit=%d Temp: %ld\n",
+				KBUILD_MODNAME, limit_idx, temp);
+#endif
 	} else if (temp < msm_thermal_info.limit_temp_degC -
 		 msm_thermal_info.temp_hysteresis_degC) {
 		if (limit_idx == limit_idx_high)
@@ -1242,6 +1323,11 @@ static void __ref do_freq_control(long temp)
 			max_freq = UINT_MAX;
 		} else
 			max_freq = table[limit_idx].frequency;
+
+#ifdef CONFIG_SEC_PM_DEBUG
+		pr_info("%s: up Limit=%d Temp: %ld\n",
+				KBUILD_MODNAME, limit_idx, temp);
+#endif
 	}
 
 	if (max_freq == cpus[cpu].limited_max_freq)
@@ -1265,6 +1351,8 @@ static void __ref check_temp(struct work_struct *work)
 	static int limit_init;
 	long temp = 0;
 	int ret = 0;
+
+	do_therm_reset();
 
 	ret = therm_get_temp(msm_thermal_info.sensor_id, THERM_TSENS_ID, &temp);
 	if (ret) {
@@ -1291,6 +1379,32 @@ reschedule:
 	if (polling_enabled)
 		schedule_delayed_work(&check_temp_work,
 				msecs_to_jiffies(msm_thermal_info.poll_ms));
+}
+
+
+static void __ref msm_therm_temp_log(struct work_struct *work)
+{
+
+	struct tsens_device tsens_dev;
+	long temp =  0;
+	int i, added = 0, ret = 0;
+	uint32_t max_sensors = 0;
+	char buffer[500];
+
+	if(!tsens_get_max_sensor_num(&max_sensors))
+	{
+		pr_info( "Debug Temp for Sensor: ");
+		for(i=0;i<max_sensors;i++)
+		{
+			tsens_dev.sensor_num = i;
+			tsens_get_temp(&tsens_dev, &temp);
+			ret = sprintf(buffer + added, "(%d --- %ld)", i, temp);
+			added += ret;						
+		}
+		pr_info("%s", buffer);
+	}
+	schedule_delayed_work(&temp_log_work,
+				HZ*5); //For every 5 seconds log the temperature values of all the msm thermistors.
 }
 
 static int __ref msm_thermal_cpu_callback(struct notifier_block *nfb,
@@ -1740,6 +1854,9 @@ static void thermal_monitor_init(void)
 		goto init_exit;
 	}
 
+	if (therm_reset_enabled)
+		therm_set_threshold(&thresh[MSM_THERM_RESET]);
+
 	if (vdd_rstr_enabled)
 		therm_set_threshold(&thresh[MSM_VDD_RESTRICTION]);
 
@@ -1842,6 +1959,9 @@ static void __ref disable_msm_thermal(void)
 	uint32_t cpu = 0;
 
 	/* make sure check_temp is no longer running */
+	/* kor_ts@sec
+	 * flush_scheduled_work () should be avoided.
+	 */
 	cancel_delayed_work_sync(&check_temp_work);
 
 	get_online_cpus();
@@ -3047,6 +3167,38 @@ hotplug_node_fail:
 	return ret;
 }
 
+static int probe_therm_reset(struct device_node *node,
+		struct msm_thermal_data *data,
+		struct platform_device *pdev)
+{
+	char *key = NULL;
+	int ret = 0;
+
+	key = "qcom,therm-reset-temp";
+	ret = of_property_read_u32(node, key, &data->therm_reset_temp_degC);
+	if (ret)
+		goto PROBE_RESET_EXIT;
+
+	ret = init_threshold(MSM_THERM_RESET, MONITOR_ALL_TSENS,
+		data->therm_reset_temp_degC, data->therm_reset_temp_degC - 10,
+		therm_reset_notify);
+	if (ret) {
+		pr_err("Therm reset data structure init failed\n");
+		goto PROBE_RESET_EXIT;
+	}
+
+	therm_reset_enabled = true;
+
+PROBE_RESET_EXIT:
+	if (ret) {
+		dev_info(&pdev->dev,
+		"%s:Failed reading node=%s, key=%s err=%d. KTM continues\n",
+			__func__, node->full_name, key, ret);
+		therm_reset_enabled = false;
+	}
+	return ret;
+}
+
 static int probe_freq_mitigation(struct device_node *node,
 		struct msm_thermal_data *data,
 		struct platform_device *pdev)
@@ -3132,6 +3284,8 @@ static int __devinit msm_thermal_dev_probe(struct platform_device *pdev)
 	ret = probe_cc(node, &data, pdev);
 
 	ret = probe_freq_mitigation(node, &data, pdev);
+	ret = probe_therm_reset(node, &data, pdev);
+
 	/*
 	 * Probe optional properties below. Call probe_psm before
 	 * probe_vdd_rstr because rpm_regulator_get has to be called
@@ -3156,11 +3310,17 @@ static int __devinit msm_thermal_dev_probe(struct platform_device *pdev)
 	 * Need to make sure sysfs node is created again
 	 */
 	if (psm_nodes_called) {
-		msm_thermal_add_psm_nodes();
+		ret = msm_thermal_add_psm_nodes();
+		if (ret)
+			pr_err("%s:%d msm_thermal_add_psm_nodes err",
+					__func__, __LINE__);
 		psm_nodes_called = false;
 	}
 	if (vdd_rstr_nodes_called) {
-		msm_thermal_add_vdd_rstr_nodes();
+		ret = msm_thermal_add_vdd_rstr_nodes();
+		if (ret)
+			pr_err("%s:%d msm_thermal_add_vdd_rstr_nodes err",
+					__func__, __LINE__);
 		vdd_rstr_nodes_called = false;
 	}
 	if (ocr_nodes_called) {
@@ -3198,6 +3358,7 @@ static int msm_thermal_dev_exit(struct platform_device *inp_dev)
 		kfree(thresh);
 		thresh = NULL;
 	}
+	cancel_delayed_work_sync(&temp_log_work);
 	return 0;
 }
 
@@ -3218,6 +3379,9 @@ static struct platform_driver msm_thermal_device_driver = {
 
 int __init msm_thermal_device_init(void)
 {
+	INIT_DELAYED_WORK(&temp_log_work, msm_therm_temp_log);
+	schedule_delayed_work(&temp_log_work, HZ*2);
+
 	return platform_driver_register(&msm_thermal_device_driver);
 }
 

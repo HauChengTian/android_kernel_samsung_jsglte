@@ -280,8 +280,8 @@ int security_sb_statfs(struct dentry *dentry)
 	return security_ops->sb_statfs(dentry);
 }
 
-int security_sb_mount(char *dev_name, struct path *path,
-                       char *type, unsigned long flags, void *data)
+int security_sb_mount(const char *dev_name, struct path *path,
+                       const char *type, unsigned long flags, void *data)
 {
 	return security_ops->sb_mount(dev_name, path, type, flags, data);
 }
@@ -671,6 +671,10 @@ int security_file_permission(struct file *file, int mask)
 
 	return fsnotify_perm(file, mask);
 }
+
+#if defined(CONFIG_VMWARE_MVP)
+EXPORT_SYMBOL_GPL(security_file_permission);
+#endif
 
 int security_file_alloc(struct file *file)
 {
