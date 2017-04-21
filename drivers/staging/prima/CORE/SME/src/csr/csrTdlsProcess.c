@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012-2013, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2012-2013 The Linux Foundation. All rights reserved.
  *
  * Previously licensed under the ISC license by Qualcomm Atheros, Inc.
  *
@@ -18,25 +18,11 @@
  * TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR
  * PERFORMANCE OF THIS SOFTWARE.
  */
+
 /*
- * Copyright (c) 2012-2013, The Linux Foundation. All rights reserved.
- *
- * Previously licensed under the ISC license by Qualcomm Atheros, Inc.
- *
- *
- * Permission to use, copy, modify, and/or distribute this software for
- * any purpose with or without fee is hereby granted, provided that the
- * above copyright notice and this permission notice appear in all
- * copies.
- *
- * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL
- * WARRANTIES WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED
- * WARRANTIES OF MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE
- * AUTHOR BE LIABLE FOR ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL
- * DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR
- * PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER
- * TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR
- * PERFORMANCE OF THIS SOFTWARE.
+ * This file was originally distributed by Qualcomm Atheros, Inc.
+ * under proprietary terms before Copyright ownership was assigned
+ * to the Linux Foundation.
  */
 
 /** ------------------------------------------------------------------------- * 
@@ -47,12 +33,8 @@
   
     Implementation for the TDLS interface to PE.
   
-   Copyright (c) 2013 Qualcomm Atheros, Inc.All Rights Reserved.
-   Qualcomm Atheros Confidential and Proprietary.
-    
-   Copyright (c) 2010 Qualcomm Technologies, Inc.All Rights Reserved.
-   Qualcomm Technologies Confidential and Proprietary
-
+    Copyright (C) 2010 Qualcomm, Incorporated
+  
  
    ========================================================================== */
 
@@ -124,7 +106,7 @@ eHalStatus csrTdlsSendMgmtReq(tHalHandle hHal, tANI_U8 sessionId, tCsrTdlsSendMg
     tpAniSirGlobal pMac = PMAC_STRUCT( hHal );
     tSmeCmd *tdlsSendMgmtCmd ;
     eHalStatus status = eHAL_STATUS_FAILURE ;
- 
+
     //If connected and in Infra. Only then allow this
     if( CSR_IS_SESSION_VALID( pMac, sessionId ) && 
         csrIsConnStateConnectedInfra( pMac, sessionId ) &&
@@ -143,6 +125,7 @@ eHalStatus csrTdlsSendMgmtReq(tHalHandle hHal, tANI_U8 sessionId, tCsrTdlsSendMg
             tdlsSendMgmtCmdInfo->dialog = tdlsSendMgmt->dialog ;   
             tdlsSendMgmtCmdInfo->statusCode = tdlsSendMgmt->statusCode ;
             tdlsSendMgmtCmdInfo->responder = tdlsSendMgmt->responder;
+            tdlsSendMgmtCmdInfo->peerCapability = tdlsSendMgmt->peerCapability;
             vos_mem_copy(tdlsSendMgmtCmdInfo->peerMac,
                                    tdlsSendMgmt->peerMac, sizeof(tSirMacAddr)) ; 
 
@@ -275,6 +258,23 @@ VOS_STATUS csrTdlsSendLinkEstablishParams(tHalHandle hHal,
             vos_mem_copy( tdlsLinkEstablishCmdInfo->peerMac,
                           peerMac, sizeof(tSirMacAddr));
             tdlsLinkEstablishCmdInfo->isBufSta = tdlsLinkEstablishParams->isBufSta;
+            tdlsLinkEstablishCmdInfo->isResponder = tdlsLinkEstablishParams->isResponder;
+            tdlsLinkEstablishCmdInfo->maxSp = tdlsLinkEstablishParams->maxSp;
+            tdlsLinkEstablishCmdInfo->uapsdQueues = tdlsLinkEstablishParams->uapsdQueues;
+            tdlsLinkEstablishCmdInfo->isOffChannelSupported =
+                                               tdlsLinkEstablishParams->isOffChannelSupported;
+
+            vos_mem_copy(tdlsLinkEstablishCmdInfo->supportedChannels,
+                          tdlsLinkEstablishParams->supportedChannels,
+                          tdlsLinkEstablishParams->supportedChannelsLen);
+            tdlsLinkEstablishCmdInfo->supportedChannelsLen =
+                                    tdlsLinkEstablishParams->supportedChannelsLen;
+
+            vos_mem_copy(tdlsLinkEstablishCmdInfo->supportedOperClasses,
+                          tdlsLinkEstablishParams->supportedOperClasses,
+                          tdlsLinkEstablishParams->supportedOperClassesLen);
+            tdlsLinkEstablishCmdInfo->supportedOperClassesLen =
+                                    tdlsLinkEstablishParams->supportedOperClassesLen;
             tdlsLinkEstablishCmdInfo->isResponder= tdlsLinkEstablishParams->isResponder;
             tdlsLinkEstablishCmdInfo->maxSp= tdlsLinkEstablishParams->maxSp;
             tdlsLinkEstablishCmdInfo->uapsdQueues= tdlsLinkEstablishParams->uapsdQueues;
@@ -360,6 +360,53 @@ eHalStatus csrTdlsDelPeerSta(tHalHandle hHal, tANI_U8 sessionId, tSirMacAddr pee
 
     return status ;
 }
+
+//tdlsoffchan
+/*
+ * TDLS request API, called from HDD to Send Channel Switch Parameters
+ */
+VOS_STATUS csrTdlsSendChanSwitchReq(tHalHandle hHal,
+                                    tANI_U8 sessionId,
+                                    tSirMacAddr peerMac,
+                                    tANI_S32 tdlsOffCh,
+                                    tANI_S32 tdlsOffChBwOffset,
+                                    tANI_U8 tdlsSwMode)
+{
+    tpAniSirGlobal pMac = PMAC_STRUCT( hHal );
+    tSmeCmd *tdlsChanSwitchCmd;
+    eHalStatus status = eHAL_STATUS_FAILURE ;
+
+    //If connected and in Infra. Only then allow this
+    if( CSR_IS_SESSION_VALID( pMac, sessionId ) &&
+        csrIsConnStateConnectedInfra( pMac, sessionId ) &&
+        (NULL != peerMac) )
+    {
+        tdlsChanSwitchCmd = csrGetCommandBuffer(pMac) ;
+
+        if(tdlsChanSwitchCmd)
+        {
+            tTdlsChanSwitchCmdInfo *tdlsChanSwitchCmdInfo =
+            &tdlsChanSwitchCmd->u.tdlsCmd.u.tdlsChanSwitchCmdInfo;
+
+            tdlsChanSwitchCmd->sessionId = sessionId;
+
+            vos_mem_copy(tdlsChanSwitchCmdInfo->peerMac,
+                         peerMac, sizeof(tSirMacAddr));
+            tdlsChanSwitchCmdInfo->tdlsOffCh = tdlsOffCh;
+            tdlsChanSwitchCmdInfo->tdlsOffChBwOffset = tdlsOffChBwOffset;
+            tdlsChanSwitchCmdInfo->tdlsSwMode = tdlsSwMode;
+
+            tdlsChanSwitchCmd->command = eSmeCommandTdlsChannelSwitch;
+            tdlsChanSwitchCmd->u.tdlsCmd.size = sizeof(tTdlsChanSwitchCmdInfo) ;
+            smePushCommand(pMac, tdlsChanSwitchCmd, FALSE) ;
+            status = eHAL_STATUS_SUCCESS ;
+        }
+    }
+
+    return status ;
+}
+
+
 #ifdef FEATURE_WLAN_TDLS_INTERNAL
 /*
  * TDLS request API, called from HDD to enable TDLS discovery request
@@ -525,6 +572,7 @@ eHalStatus csrTdlsProcessSendMgmt( tpAniSirGlobal pMac, tSmeCmd *cmd )
     tdlsSendMgmtReq->dialog =  tdlsSendMgmtCmdInfo->dialog ;
     tdlsSendMgmtReq->statusCode =  tdlsSendMgmtCmdInfo->statusCode ;
     tdlsSendMgmtReq->responder =  tdlsSendMgmtCmdInfo->responder;
+    tdlsSendMgmtReq->peerCapability = tdlsSendMgmtCmdInfo->peerCapability;
 
     vos_mem_copy(tdlsSendMgmtReq->bssid,
                   pSession->pConnectBssDesc->bssId, sizeof (tSirMacAddr));
@@ -733,6 +781,16 @@ eHalStatus csrTdlsProcessCmd(tpAniSirGlobal pMac, tSmeCmd *cmd)
             }
         }
         break;
+// tdlsoffchan
+        case eSmeCommandTdlsChannelSwitch:
+        {
+             status = csrTdlsProcessChanSwitchReq( pMac, cmd );
+             if(HAL_STATUS_SUCCESS( status ) )
+             {
+               status = eANI_BOOLEAN_FALSE ;
+             }
+        }
+        break;
 #ifdef FEATURE_WLAN_TDLS_INTERNAL
         case eSmeCommandTdlsDiscovery:
         {
@@ -887,6 +945,16 @@ eHalStatus csrTdlsProcessLinkEstablish( tpAniSirGlobal pMac, tSmeCmd *cmd )
                   tdlsLinkEstablishCmdInfo->peerMac, sizeof(tSirMacAddr));
     vos_mem_copy(tdlsLinkEstablishReq->bssid, pSession->pConnectBssDesc->bssId,
                   sizeof (tSirMacAddr));
+    vos_mem_copy(tdlsLinkEstablishReq->supportedChannels,
+                  tdlsLinkEstablishCmdInfo->supportedChannels,
+                  tdlsLinkEstablishCmdInfo->supportedChannelsLen);
+    tdlsLinkEstablishReq->supportedChannelsLen =
+                      tdlsLinkEstablishCmdInfo->supportedChannelsLen;
+    vos_mem_copy(tdlsLinkEstablishReq->supportedOperClasses,
+                  tdlsLinkEstablishCmdInfo->supportedOperClasses,
+                  tdlsLinkEstablishCmdInfo->supportedOperClassesLen);
+    tdlsLinkEstablishReq->supportedOperClassesLen =
+                      tdlsLinkEstablishCmdInfo->supportedOperClassesLen;
     tdlsLinkEstablishReq->isBufSta = tdlsLinkEstablishCmdInfo->isBufSta;
     tdlsLinkEstablishReq->isResponder= tdlsLinkEstablishCmdInfo->isResponder;
     tdlsLinkEstablishReq->uapsdQueues= tdlsLinkEstablishCmdInfo->uapsdQueues;
@@ -898,6 +966,51 @@ eHalStatus csrTdlsProcessLinkEstablish( tpAniSirGlobal pMac, tSmeCmd *cmd )
     status = tdlsSendMessage(pMac, eWNI_SME_TDLS_LINK_ESTABLISH_REQ,
                              (void *)tdlsLinkEstablishReq,
                              sizeof(tSirTdlsLinkEstablishReq));
+    if (!HAL_STATUS_SUCCESS( status ) )
+    {
+        smsLog( pMac, LOGE, FL("Failed to send request to MAC\n"));
+    }
+    return status;
+}
+
+// tdlsoffchan
+eHalStatus csrTdlsProcessChanSwitchReq( tpAniSirGlobal pMac, tSmeCmd *cmd )
+{
+    tTdlsChanSwitchCmdInfo *tdlsChanSwitchCmdInfo = &cmd->u.tdlsCmd.u.tdlsChanSwitchCmdInfo ;
+    tSirTdlsChanSwitch *tdlsChanSwitch = NULL ;
+    eHalStatus status = eHAL_STATUS_FAILURE;
+    tCsrRoamSession *pSession = CSR_GET_SESSION( pMac, cmd->sessionId );
+
+    if (NULL == pSession)
+    {
+        smsLog( pMac, LOGE, FL("pSession is NULL"));
+        return eHAL_STATUS_FAILURE;
+    }
+
+    tdlsChanSwitch = vos_mem_malloc(sizeof(tSirTdlsChanSwitch));
+    if (tdlsChanSwitch == NULL)
+    {
+        smsLog( pMac, LOGE, FL("alloc failed \n") );
+        VOS_ASSERT(0) ;
+        return status ;
+    }
+    tdlsChanSwitch->sessionId = cmd->sessionId;
+    //Using dialog as transactionId. This can be used to match response with request
+    tdlsChanSwitch->transactionId = 0;
+    vos_mem_copy( tdlsChanSwitch->peerMac,
+                  tdlsChanSwitchCmdInfo->peerMac, sizeof(tSirMacAddr));
+    vos_mem_copy(tdlsChanSwitch->bssid, pSession->pConnectBssDesc->bssId,
+                 sizeof (tSirMacAddr));
+
+    tdlsChanSwitch->tdlsOffCh = tdlsChanSwitchCmdInfo->tdlsOffCh;
+    tdlsChanSwitch->tdlsOffChBwOffset = tdlsChanSwitchCmdInfo->tdlsOffChBwOffset;
+    tdlsChanSwitch->tdlsSwMode = tdlsChanSwitchCmdInfo->tdlsSwMode;
+
+    // Send the request to PE.
+    smsLog( pMac, LOGE, "sending TDLS Channel Switch to PE \n" );
+    status = tdlsSendMessage(pMac, eWNI_SME_TDLS_CHANNEL_SWITCH_REQ,
+                             (void *)tdlsChanSwitch,
+                             sizeof(tSirTdlsChanSwitch));
     if (!HAL_STATUS_SUCCESS( status ) )
     {
         smsLog( pMac, LOGE, FL("Failed to send request to MAC\n"));
@@ -1149,6 +1262,24 @@ eHalStatus tdlsMsgProcessor(tpAniSirGlobal pMac,  v_U16_t msgType,
                                eCSR_ROAM_RESULT_LINK_ESTABLISH_REQ_RSP);
             /* remove pending eSmeCommandTdlsLinkEstablish command */
             csrTdlsRemoveSmeCmd(pMac, eSmeCommandTdlsLinkEstablish);
+            break;
+        }
+
+        case eWNI_SME_TDLS_CHANNEL_SWITCH_RSP:
+        {
+#if 0
+            tSirTdlsChanSwitchReqRsp *ChanSwitchReqRsp = (tSirTdlsChanSwitchReqRsp *) pMsgBuf ;
+            tCsrRoamInfo roamInfo = {0} ;
+            vos_mem_copy(&roamInfo.peerMac, delStaRsp->peerMac,
+                                         sizeof(tSirMacAddr)) ;
+            roamInfo.staId = delStaRsp->staId ;
+            roamInfo.statusCode = delStaRsp->statusCode ;
+            csrRoamCallCallback(pMac, ChanSwitchReqRsp->sessionId, &roamInfo, 0,
+                                eCSR_ROAM_TDLS_STATUS_UPDATE,
+                                eCSR_ROAM_RESULT_LINK_ESTABLISH_REQ_RSP);
+#endif
+            /* remove pending eSmeCommandTdlsChanSwitch command */
+            csrTdlsRemoveSmeCmd(pMac, eSmeCommandTdlsChannelSwitch);
             break;
         }
 #ifdef FEATURE_WLAN_TDLS_INTERNAL
